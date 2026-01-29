@@ -59,7 +59,7 @@ jobs:
 
   rdp:
     needs: setup
-    runs-on: windows-2022
+    runs-on: windows-2019
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
@@ -78,90 +78,6 @@ jobs:
           if ($crd.Length -gt 0) { "CRD_ENABLED=1" | Out-File -Append $env:GITHUB_ENV } else { "CRD_ENABLED=0" | Out-File -Append $env:GITHUB_ENV }
           Write-Host "CRD_ENABLED=$([int]($crd.Length -gt 0))"
 
-      - name: Install Chrome Remote Desktop Host (if missing)  # EXE -> MSI fallback
-        if: env.CRD_ENABLED == '1'
-        run: |
-          $exe = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
-          if (-not (Test-Path $exe)) {
-            Write-Host "CRD host not found, attempting install (EXE -> MSI fallback)..."
-            $exePath = "$env:TEMP\chromeremotedesktophost.exe"
-            $ok = $false
-            try {
-              Invoke-WebRequest -Uri "https://dl.google.com/support/remote_assistance/ChromotingHostSetup.exe" -OutFile $exePath -ErrorAction Stop
-              Start-Process -FilePath $exePath -ArgumentList "/silent","/install" -Wait
-              Remove-Item $exePath -Force
-              $ok = $true
-            } catch {
-              Write-Host "EXE installer failed or missing: $($_.Exception.Message)"
-            }
-            if (-not $ok) {
-              $msi = "$env:TEMP\chromeremotedesktophost.msi"
-              try {
-                Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $msi -ErrorAction Stop
-                Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/quiet","/norestart" -Wait
-                Remove-Item $msi -Force
-              } catch {
-                Write-Error "CRD MSI fallback failed: $($_.Exception.Message)"
-                exit 1
-              }
-            }
-          } else {
-            Write-Host "CRD host already installed."
-          }
-
-      - name: Run Chrome Remote Desktop (accept raw code / full cmd / url) with PIN
-        if: env.CRD_ENABLED == '1'
-        run: |
-          $raw = @'
-          ${{ inputs.crd_code }}
-          '@.Trim()
-          $pin = "${{ inputs.crd_pin }}".Trim()
-          if ($pin -notmatch '^\d{6,12}$') { Write-Error "crd_pin must be 6–12 digits."; exit 1 }
-
-          $starter = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
-          if (-not (Test-Path $starter)) { Write-Error "remoting_start_host.exe not found."; exit 1 }
-
-          $isFull = $false; $code = $null
-          if ($raw -match 'remoting_start_host\.exe') { $isFull = $true }
-          if ($raw -match '--code\s*=\s*"?([^"\s]+)') { $code = ([regex]::Match($raw,'--code\s*=\s*"?([^"\s]+)')).Groups[1].Value }
-          elseif ($raw -match '^4\/') { $code = $raw }
-
-          if ($code) {
-            $redir = "https://remotedesktop.google.com/_/oauthredirect"
-            $name  = $Env:COMPUTERNAME
-            $args  = @("--code=""$code""","--redirect-url=""$redir""","--name=""$name""","--pin=""$pin""")
-            Start-Process -FilePath $starter -ArgumentList $args
-          } elseif ($isFull) {
-            # Last resort: run as-is (might prompt if it lacks --pin)
-            $tmp = "$env:TEMP\crd_full.ps1"
-            Set-Content -Path $tmp -Value $raw -Encoding UTF8
-            powershell -ExecutionPolicy Bypass -File $tmp
-          } else {
-            Write-Error "Could not detect CRD code. Provide raw code (4/...), full command, or string containing --code=\"4/...\""
-            exit 1
-          }
-          Write-Host "CRD launch step completed with PIN."
-
-      - name: Verify CRD registration (service + recent logs)
-        if: env.CRD_ENABLED == '1'
-        run: |
-          $svcName = "Chrome Remote Desktop Service"
-          $deadline = (Get-Date).AddSeconds(60)
-          $ok = $false
-          while ((Get-Date) -lt $deadline) {
-            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -in 'Running','StartPending') { $ok = $true; break }
-            Start-Sleep -Seconds 3
-          }
-          if ($ok) { Write-Host "[$svcName] status: Running or starting." } else { Write-Warning "[$svcName] not running yet." }
-
-          $logDir = "$env:ProgramData\Google\Chrome Remote Desktop"
-          if (Test-Path $logDir) {
-            Get-ChildItem $logDir -Filter "host*.log" | Sort-Object LastWriteTime -Descending | Select-Object -First 2 | ForEach-Object {
-              Write-Host "----- LOG: $($_.FullName) -----"
-              Get-Content $_.FullName -Tail 200
-            }
-          } else { Write-Host "CRD log directory not found: $logDir" }
 
       # --- Continue with the rest after CRD is launched ---
       - name: Decide hostname + runtime
@@ -232,12 +148,6 @@ jobs:
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
           Write-Host "RDP ready. user=$u pass=$p host=$env:TS_HOSTNAME ip=$env:TAILSCALE_IP"
-
-      - name: Install Python libs (pyautogui/pynput/pillow)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --force-reinstall pyautogui pynput pillow
-          python -c "import pyautogui, pynput, PIL; print('Python libs OK')"
 
       - name: Keep alive (to ${{ env.RUNTIME_MINUTES }} mins)
         run: |
