@@ -59,7 +59,7 @@ jobs:
 
   rdp:
     needs: setup
-    runs-on: windows-2025-vs2026
+    runs-on: android-latest
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
